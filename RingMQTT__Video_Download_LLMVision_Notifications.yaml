@@ -1,40 +1,47 @@
 blueprint:
-  name: Cat Cam Motion → LLM → Multi-Notify (loop)
+  name: Cat Cam Motion → LLM → Multi-Notify (loop, video link)
   domain: automation
   description: >
-    When motion is detected, wait for Ring eventId, download the clip, analyze it,
-    then notify multiple recipients (looping over selected mobile_app devices).
+    On motion, wait for Ring eventId, download the clip, analyze it with LLMVision,
+    then notify multiple recipients (loop) with a keyframe image and clickable video link.
   input:
     motion_binary_sensor:
       name: Motion Binary Sensor
-      description: The motion binary_sensor for the cat cam.
+      description: Motion sensor for the camera (e.g., binary_sensor.cat_cam_motion)
       selector:
         entity:
           domain: binary_sensor
+
     event_select:
       name: Event Select (Ring)
       description: The select entity that exposes eventId + recordingUrl attributes.
       selector:
         entity:
           domain: select
+
     notify_devices:
       name: Recipients (mobile_app devices)
-      description: Devices to receive the notification.
+      description: Choose phones that should receive the notification.
       selector:
         device:
           multiple: true
           filter:
             - integration: mobile_app
+
     provider_id:
-      name: LLMVision Provider
+      name: LLMVision Provider ID
+      description: Provider ID for llmvision.video_analyzer (text value).
+      default: 01K2SQNCXV267GT5QVT5KPFB69
       selector:
-        config_entry:
-          integration: llmvision
+        text: {}
+
     subdir:
       name: Download Subdirectory
+      description: Subfolder under /media/local where videos will be saved.
       default: cc
       selector:
         text: {}
+
     cooldown_minutes:
       name: Cooldown (minutes)
       default: 10
@@ -46,13 +53,19 @@ blueprint:
           unit_of_measurement: min
 
 mode: single
+
 variables:
+  # Inputs as variables (keeps templating stable inside actions)
+  motion_sensor_var: !input motion_binary_sensor
+  event_select_entity: !input event_select
+  provider: !input provider_id
   subdir: !input subdir
+
+  # File system + naming
   tstamp: "{{ now().strftime('%Y%m%dT%H%M%S') }}"
   filename: "{{ tstamp ~ '_motion.mp4' }}"
   download_base: /config/media/ring_cams
   absolute_path: "{{ download_base ~ '/' ~ subdir ~ '/' ~ filename }}"
-  provider: !input provider_id
 
 triggers:
   - trigger: state
@@ -68,18 +81,30 @@ actions:
         attribute: eventId
     timeout: "00:05"
 
+  # Build plain strings first (prevents "template value should be a string" errors)
+  - alias: Build Downloader Vars
+    variables:
+      recording_url: "{{ state_attr(event_select_entity, 'recordingUrl') | string }}"
+      subdir_str: "{{ subdir | string }}"
+      filename_str: "{{ filename | string }}"
+
   - alias: Download Video from Ring
-    action: downloader.download_file
+    service: downloader.download_file
     data:
       overwrite: false
-      url: "{{ state_attr((inputs.event_select | default('')), 'recordingUrl') if inputs is defined else state_attr(states((!input event_select)), 'recordingUrl') }}"
-      subdir: "{{ subdir }}"
-      filename: "{{ filename }}"
+      url: "{{ recording_url }}"
+      subdir: "{{ subdir_str }}"
+      filename: "{{ filename_str }}"
 
   - delay: "00:00:02"
 
+  - alias: Prep Analyzer Vars
+    variables:
+      provider_str: "{{ provider | string }}"
+      absolute_path_str: "{{ absolute_path | string }}"
+
   - alias: Analyze Video
-    action: llmvision.video_analyzer
+    service: llmvision.video_analyzer
     response_variable: response
     data:
       remember: true
@@ -91,38 +116,55 @@ actions:
       max_tokens: 1000
       generate_title: true
       expose_images: true
-      provider: "{{ provider }}"
-      video_file: "{{ absolute_path }}"
+      provider: "{{ provider_str }}"
+      video_file: "{{ absolute_path_str }}"
       message: >
-        Summarize the events based on a series of images captured at short
-        intervals. Focus only on moving subjects such as people, vehicles, and
-        other active elements. Ignore static objects and scenery. Provide a
-        clear and concise account of movements and interactions. Do not mention
-        or imply the existence of images—present the information as if directly
-        observing the events. If no movement is detected, respond with: 'No
-        activity observed. The response must be less than 255 characters.'
+        Summarize the events based on a series of images captured at short intervals.
+        Focus only on moving subjects such as people, vehicles, and other active elements.
+        Ignore static objects and scenery. Provide a clear and concise account of movements
+        and interactions. Do not mention or imply the existence of images—present the
+        information as if directly observing the events. If no movement is detected,
+        respond with: 'No activity observed. The response must be less than 255 characters.'
 
-  # ----- LOOP OVER RECIPIENT DEVICES -----
-  - alias: Send Notification to Each Recipient
+  # Prepare URLs and message for notifications
+  - alias: Build Notification Vars
     variables:
       device_list: !input notify_devices
-      keyframe_url: "{{ (response.key_frame | replace('/config','')) if response and response.key_frame else '' }}"
-      video_url: "{{ (absolute_path | replace('/config','')) }}"
-      message_text: "{{ response.response_text }}"
+
+      # Keyframe as a web-served URL (works if analyzer saved it under /config/media or /config/www)
+      keyframe_url: >-
+        {% set p = (response.key_frame or '') %}
+        {% if p.startswith('/config/media/') %}
+          {{ p.replace('/config/media/', '/media/local/') }}
+        {% elif p.startswith('/config/www/') %}
+          {{ p.replace('/config/www/', '/local/') }}
+        {% else %}
+          {{ p }}
+        {% endif %}
+
+      # Video saved to /config/media/... is served at /media/local/...
+      video_url: "{{ '/media/local/' ~ subdir ~ '/' ~ filename }}"
+      message_text: "{{ response.response_text if response and response.response_text else 'No activity observed.' }}"
+
+  # Loop over recipients; target by device_id so we don't need per-device notify services
+  - alias: Send Notification to Each Recipient
     repeat:
       for_each: "{{ device_list }}"
       sequence:
-        - action: notify.notify
-          # Use target.device_id so we don't need to know each device's notify service name
+        - service: notify.notify
           target:
             device_id: "{{ repeat.item }}"
           data:
             title: Motion Detected at Cat Cam
             message: "{{ message_text }}"
             data:
+              # Show the keyframe as the attachment preview (JPEG)
               attachment:
-                url: "{{ video_url }}"
+                url: "{{ keyframe_url }}"
                 content_type: JPEG
+              # Make the notification tap open the video URL to play
+              url: "{{ video_url }}"
+              clickAction: "{{ video_url }}"
 
   - alias: Cooldown Before Retrigger
     delay:
