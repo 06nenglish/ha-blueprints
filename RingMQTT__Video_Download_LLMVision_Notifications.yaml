@@ -127,17 +127,14 @@ action:
         information as if directly observing the events. If no movement is detected,
         respond with: 'No activity observed. The response must be less than 255 characters.'
 
-  # Prepare URLs and message for notifications (use image: to avoid 404/auth issues)
+  # Prepare URLs and message for notifications (no url() helper; use relative paths)
   - alias: Build Notification Vars
     variables:
       device_list: !input notify_devices
 
-      # Keep your working approach; app will fetch via authenticated session
+      # Keyframe & video as RELATIVE paths (HA app fetches via authenticated session)
       keyframe_rel: "{{ (response.key_frame | default('')) | replace('/config','') }}"
       video_rel: "{{ absolute_path | replace('/config','') }}"
-
-      # Absolute URL for tap (uses External URL or Nabu Casa remote URL if configured)
-      video_abs: "{{ url(video_rel) }}"
 
       message_text: "{{ response.response_text | default('No activity observed.') }}"
 
@@ -158,11 +155,11 @@ action:
             title: Motion Detected at Cat Cam
             message: "{{ message_text }}"
             data:
-              # IMAGE: app fetches via HA auth (works locally and remotely)
+              # IMAGE: app fetches via HA auth (works locally and via Cloud)
               image: "{{ keyframe_rel }}"
-              # TAP: open video (absolute URL so it works outside too)
-              url: "{{ video_abs }}"
-              clickAction: "{{ video_abs }}"
+              # TAP: open the video (relative path resolves inside the app webview)
+              url: "{{ video_rel }}"
+              clickAction: "{{ video_rel }}"
 
   - alias: Cooldown Before Retrigger
     delay:
