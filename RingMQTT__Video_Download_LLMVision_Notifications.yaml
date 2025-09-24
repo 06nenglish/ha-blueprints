@@ -1,28 +1,26 @@
 blueprint:
-  name: Cat Cam Motion → LLM → Multi-Notify (loop, video link)
+  name: Cat Cam Motion → LLM → Multi-Notify (in-app open, /media)
   domain: automation
   description: >
-    On motion, wait for Ring eventId, download the clip, analyze it with LLMVision,
-    then notify multiple recipients (loop) with a keyframe image and clickable video link.
+    On motion, wait for Ring eventId, download the clip to /media, analyze with LLMVision,
+    then notify multiple recipients (loop) with a keyframe image and a tap-to-play video
+    that opens INSIDE the HA app (uses 'path', not external browser).
 
   input:
     motion_binary_sensor:
       name: Motion Binary Sensor
-      description: Motion sensor for the camera (e.g., binary_sensor.cat_cam_motion)
       selector:
         entity:
           domain: binary_sensor
 
     event_select:
       name: Event Select (Ring)
-      description: The select entity that exposes eventId + recordingUrl attributes.
       selector:
         entity:
           domain: select
 
     notify_devices:
       name: Recipients (mobile_app devices)
-      description: Choose phones that should receive the notification.
       selector:
         device:
           multiple: true
@@ -55,17 +53,15 @@ blueprint:
 
 mode: single
 
-# ---- Global variables (safe to reference in actions) ----
+# ---- Global variables ----
 variables:
-  motion_sensor_var: !input motion_binary_sensor
   event_select_entity: !input event_select
   provider: !input provider_id
   subdir: !input subdir
 
-  # File system + naming
+  # Save to /config/media so LLM Vision works; HA serves as /media/local/...
   tstamp: "{{ now().strftime('%Y%m%dT%H%M%S') }}"
   filename: "{{ tstamp ~ '_motion.mp4' }}"
-  # Files saved under /config/media/... are served by HA as /media/local/...
   download_base: /config/media/ring_cams
   absolute_path: "{{ download_base ~ '/' ~ subdir ~ '/' ~ filename }}"
 
@@ -82,7 +78,7 @@ action:
         attribute: eventId
     timeout: "00:05"
 
-  # Build plain strings first (prevents "template value should be a string" errors)
+  # Precompute plain strings
   - alias: Build Downloader Vars
     variables:
       recording_url: "{{ state_attr(event_select_entity, 'recordingUrl') | string }}"
@@ -127,25 +123,34 @@ action:
         information as if directly observing the events. If no movement is detected,
         respond with: 'No activity observed. The response must be less than 255 characters.'
 
-  # Prepare URLs and message for notifications (no url() helper; use relative paths)
+  # Prepare notification vars (stay on /media; use 'path' to open in app)
   - alias: Build Notification Vars
     variables:
       device_list: !input notify_devices
 
-      # Keyframe & video as RELATIVE paths (HA app fetches via authenticated session)
-      keyframe_rel: "{{ (response.key_frame | default('')) | replace('/config','') }}"
-      video_rel: "{{ absolute_path | replace('/config','') }}"
+      # Keyframe path -> relative web path the app can fetch via auth
+      keyframe_rel: >-
+        {% set p = (response.key_frame | default('')) %}
+        {% if p.startswith('/config/media/') %}
+          {{ p.replace('/config/media/', '/media/local/') }}
+        {% elif p.startswith('/config/www/') %}
+          {{ p.replace('/config/www/', '/local/') }}
+        {% else %}
+          {{ p.replace('/config','') }}
+        {% endif %}
+
+      # Video is under /config/media/ring_cams/... -> served at /media/local/ring_cams/...
+      video_rel: "{{ absolute_path | replace('/config/media/','/media/local/') }}"
 
       message_text: "{{ response.response_text | default('No activity observed.') }}"
 
-  # ----- LOOP OVER RECIPIENT DEVICES (use per-device mobile_app service) -----
+  # Notify each device using its mobile_app service; open INSIDE app using 'path'
   - alias: Send Notification to Each Recipient
     repeat:
       for_each: "{{ device_list }}"
       sequence:
         - alias: Build per-device notify service name
           variables:
-            # e.g., Device name "Nathan’s iPhone" -> service notify.mobile_app_nathans_iphone
             service_name: >-
               {{ 'notify.mobile_app_' ~ (device_attr(repeat.item, 'name') | slugify) }}
 
@@ -155,11 +160,10 @@ action:
             title: Motion Detected at Cat Cam
             message: "{{ message_text }}"
             data:
-              # IMAGE: app fetches via HA auth (works locally and via Cloud)
+              # Show keyframe; fetched via app session (auth-safe)
               image: "{{ keyframe_rel }}"
-              # TAP: open the video (relative path resolves inside the app webview)
-              url: "{{ video_rel }}"
-              clickAction: "{{ video_rel }}"
+              # Force in-app open using the 'path' key (no external browser)
+              path: "{{ video_rel }}"
 
   - alias: Cooldown Before Retrigger
     delay:
