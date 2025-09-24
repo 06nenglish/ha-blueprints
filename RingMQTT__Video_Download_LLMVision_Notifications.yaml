@@ -31,13 +31,13 @@ blueprint:
     provider_id:
       name: LLMVision Provider ID
       description: Provider ID for llmvision.video_analyzer (text value).
+      default: 01K2SQNCXV267GT5QVT5KPFB69
       selector:
-        config_entry:
-          integration: llmvision
+        text: {}
 
     subdir:
       name: Download Subdirectory
-      description: Subfolder under /media/local where videos will be saved.
+      description: Subfolder under /media/local/ring_cams where videos will be saved.
       default: cc
       selector:
         text: {}
@@ -54,8 +54,8 @@ blueprint:
 
 mode: single
 
+# ---- Global variables (safe to reference in actions) ----
 variables:
-  # Inputs as variables (keeps templating stable inside actions)
   motion_sensor_var: !input motion_binary_sensor
   event_select_entity: !input event_select
   provider: !input provider_id
@@ -64,6 +64,7 @@ variables:
   # File system + naming
   tstamp: "{{ now().strftime('%Y%m%dT%H%M%S') }}"
   filename: "{{ tstamp ~ '_motion.mp4' }}"
+  # Files saved under /config/media/... are served as /media/local/...
   download_base: /config/media/ring_cams
   absolute_path: "{{ download_base ~ '/' ~ subdir ~ '/' ~ filename }}"
 
@@ -142,26 +143,31 @@ actions:
           {{ p }}
         {% endif %}
 
-      # Video saved to /config/media/... is served at /media/local/...
-      video_url: "{{ '/media/local/' ~ subdir ~ '/' ~ filename }}"
+      # Video saved to /config/media/ring_cams/... is served at /media/local/ring_cams/...
+      video_url: "{{ '/media/local/ring_cams/' ~ subdir ~ '/' ~ filename }}"
       message_text: "{{ response.response_text if response and response.response_text else 'No activity observed.' }}"
 
-  # Loop over recipients; target by device_id so we don't need per-device notify services
+  # ----- LOOP OVER RECIPIENT DEVICES (use per-device mobile_app service) -----
   - alias: Send Notification to Each Recipient
     repeat:
       for_each: "{{ device_list }}"
       sequence:
-        - service: notify.notify
-          target:
-            device_id: "{{ repeat.item }}"
+        - alias: Build per-device notify service name
+          variables:
+            # e.g., Device name "Nathan’s iPhone" -> service notify.mobile_app_nathans_iphone
+            service_name: >-
+              {{ 'notify.mobile_app_' ~ (device_attr(repeat.item, 'name') | slugify) }}
+
+        - alias: Send to device
+          service: "{{ service_name }}"
           data:
             title: Motion Detected at Cat Cam
             message: "{{ message_text }}"
             data:
-              # Show the keyframe as the attachment preview (JPEG)
+              # Show the keyframe as the notification thumbnail
               attachment:
                 url: "{{ keyframe_url }}"
-                content_type: JPEG
+                content_type: "JPEG"
               # Make the notification tap open the video URL to play
               url: "{{ video_url }}"
               clickAction: "{{ video_url }}"
