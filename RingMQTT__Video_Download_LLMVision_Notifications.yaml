@@ -31,9 +31,9 @@ blueprint:
     provider_id:
       name: LLMVision Provider ID
       description: Provider ID for llmvision.video_analyzer (text value).
-      default: 01K2SQNCXV267GT5QVT5KPFB69
       selector:
-        text: {}
+        config_entry:
+          integration: llmvision
 
     subdir:
       name: Download Subdirectory
