@@ -1,0 +1,129 @@
+blueprint:
+  name: Cat Cam Motion → LLM → Multi-Notify (loop)
+  domain: automation
+  description: >
+    When motion is detected, wait for Ring eventId, download the clip, analyze it,
+    then notify multiple recipients (looping over selected mobile_app devices).
+  input:
+    motion_binary_sensor:
+      name: Motion Binary Sensor
+      description: The motion binary_sensor for the cat cam.
+      selector:
+        entity:
+          domain: binary_sensor
+    event_select:
+      name: Event Select (Ring)
+      description: The select entity that exposes eventId + recordingUrl attributes.
+      selector:
+        entity:
+          domain: select
+    notify_devices:
+      name: Recipients (mobile_app devices)
+      description: Devices to receive the notification.
+      selector:
+        device:
+          multiple: true
+          filter:
+            - integration: mobile_app
+    provider_id:
+      name: LLMVision Provider
+      selector:
+        config_entry:
+          integration: llmvision
+    subdir:
+      name: Download Subdirectory
+      default: cc
+      selector:
+        text: {}
+    cooldown_minutes:
+      name: Cooldown (minutes)
+      default: 10
+      selector:
+        number:
+          min: 0
+          max: 120
+          mode: slider
+          unit_of_measurement: min
+
+mode: single
+variables:
+  subdir: !input subdir
+  tstamp: "{{ now().strftime('%Y%m%dT%H%M%S') }}"
+  filename: "{{ tstamp ~ '_motion.mp4' }}"
+  download_base: /config/media/ring_cams
+  absolute_path: "{{ download_base ~ '/' ~ subdir ~ '/' ~ filename }}"
+  provider: !input provider_id
+
+triggers:
+  - trigger: state
+    entity_id: !input motion_binary_sensor
+    to: "on"
+    alias: Trigger on Camera Motion Detection
+
+actions:
+  - alias: Wait for EventId to Change
+    wait_for_trigger:
+      - trigger: state
+        entity_id: !input event_select
+        attribute: eventId
+    timeout: "00:05"
+
+  - alias: Download Video from Ring
+    action: downloader.download_file
+    data:
+      overwrite: false
+      url: "{{ state_attr((inputs.event_select | default('')), 'recordingUrl') if inputs is defined else state_attr(states((!input event_select)), 'recordingUrl') }}"
+      subdir: "{{ subdir }}"
+      filename: "{{ filename }}"
+
+  - delay: "00:00:02"
+
+  - alias: Analyze Video
+    action: llmvision.video_analyzer
+    response_variable: response
+    data:
+      remember: true
+      frigate_retry_attempts: 2
+      frigate_retry_seconds: 1
+      max_frames: 3
+      include_filename: false
+      target_width: 1280
+      max_tokens: 1000
+      generate_title: true
+      expose_images: true
+      provider: "{{ provider }}"
+      video_file: "{{ absolute_path }}"
+      message: >
+        Summarize the events based on a series of images captured at short
+        intervals. Focus only on moving subjects such as people, vehicles, and
+        other active elements. Ignore static objects and scenery. Provide a
+        clear and concise account of movements and interactions. Do not mention
+        or imply the existence of images—present the information as if directly
+        observing the events. If no movement is detected, respond with: 'No
+        activity observed. The response must be less than 255 characters.'
+
+  # ----- LOOP OVER RECIPIENT DEVICES -----
+  - alias: Send Notification to Each Recipient
+    variables:
+      device_list: !input notify_devices
+      keyframe_url: "{{ (response.key_frame | replace('/config','')) if response and response.key_frame else '' }}"
+      video_url: "{{ (absolute_path | replace('/config','')) }}"
+      message_text: "{{ response.response_text }}
+    repeat:
+      for_each: "{{ device_list }}"
+      sequence:
+        - action: notify.notify
+          # Use target.device_id so we don't need to know each device's notify service name
+          target:
+            device_id: "{{ repeat.item }}"
+          data:
+            title: Motion Detected at Cat Cam
+            message: "{{ message_text }}"
+            data:
+              attachment:
+                url: "{{ video_url }}"
+                content_type: JPEG
+
+  - alias: Cooldown Before Retrigger
+    delay:
+      minutes: !input cooldown_minutes
