@@ -4,6 +4,7 @@ blueprint:
   description: >
     On motion, wait for Ring eventId, download the clip, analyze it with LLMVision,
     then notify multiple recipients (loop) with a keyframe image and clickable video link.
+
   input:
     motion_binary_sensor:
       name: Motion Binary Sensor
@@ -64,20 +65,19 @@ variables:
   # File system + naming
   tstamp: "{{ now().strftime('%Y%m%dT%H%M%S') }}"
   filename: "{{ tstamp ~ '_motion.mp4' }}"
-  # Files saved under /config/media/... are served as /media/local/...
+  # Files saved under /config/media/... are served by HA as /media/local/...
   download_base: /config/media/ring_cams
   absolute_path: "{{ download_base ~ '/' ~ subdir ~ '/' ~ filename }}"
 
-triggers:
-  - trigger: state
+trigger:
+  - platform: state
     entity_id: !input motion_binary_sensor
     to: "on"
-    alias: Trigger on Camera Motion Detection
 
-actions:
+action:
   - alias: Wait for EventId to Change
     wait_for_trigger:
-      - trigger: state
+      - platform: state
         entity_id: !input event_select
         attribute: eventId
     timeout: "00:05"
@@ -127,25 +127,19 @@ actions:
         information as if directly observing the events. If no movement is detected,
         respond with: 'No activity observed. The response must be less than 255 characters.'
 
-  # Prepare URLs and message for notifications
+  # Prepare URLs and message for notifications (use image: to avoid 404/auth issues)
   - alias: Build Notification Vars
     variables:
       device_list: !input notify_devices
 
-      # Keyframe as a web-served URL (works if analyzer saved it under /config/media or /config/www)
-      keyframe_url: >-
-        {% set p = (response.key_frame or '') %}
-        {% if p.startswith('/config/media/') %}
-          {{ p.replace('/config/media/', '/media/local/') }}
-        {% elif p.startswith('/config/www/') %}
-          {{ p.replace('/config/www/', '/local/') }}
-        {% else %}
-          {{ p }}
-        {% endif %}
+      # Keep your working approach; app will fetch via authenticated session
+      keyframe_rel: "{{ (response.key_frame | default('')) | replace('/config','') }}"
+      video_rel: "{{ absolute_path | replace('/config','') }}"
 
-      # Video saved to /config/media/ring_cams/... is served at /media/local/ring_cams/...
-      video_url: "{{ '/media/local/ring_cams/' ~ subdir ~ '/' ~ filename }}"
-      message_text: "{{ response.response_text if response and response.response_text else 'No activity observed.' }}"
+      # Absolute URL for tap (uses External URL or Nabu Casa remote URL if configured)
+      video_abs: "{{ url(video_rel) }}"
+
+      message_text: "{{ response.response_text | default('No activity observed.') }}"
 
   # ----- LOOP OVER RECIPIENT DEVICES (use per-device mobile_app service) -----
   - alias: Send Notification to Each Recipient
@@ -164,13 +158,11 @@ actions:
             title: Motion Detected at Cat Cam
             message: "{{ message_text }}"
             data:
-              # Show the keyframe as the notification thumbnail
-              attachment:
-                url: "{{ keyframe_url }}"
-                content_type: "JPEG"
-              # Make the notification tap open the video URL to play
-              url: "{{ video_url }}"
-              clickAction: "{{ video_url }}"
+              # IMAGE: app fetches via HA auth (works locally and remotely)
+              image: "{{ keyframe_rel }}"
+              # TAP: open video (absolute URL so it works outside too)
+              url: "{{ video_abs }}"
+              clickAction: "{{ video_abs }}"
 
   - alias: Cooldown Before Retrigger
     delay:
