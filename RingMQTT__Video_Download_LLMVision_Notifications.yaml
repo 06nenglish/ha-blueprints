@@ -108,7 +108,7 @@ actions:
       device_list: !input notify_devices
       keyframe_url: "{{ (response.key_frame | replace('/config','')) if response and response.key_frame else '' }}"
       video_url: "{{ (absolute_path | replace('/config','')) }}"
-      message_text: "{{ response.response_text }}
+      message_text: "{{ response.response_text }}"
     repeat:
       for_each: "{{ device_list }}"
       sequence:
