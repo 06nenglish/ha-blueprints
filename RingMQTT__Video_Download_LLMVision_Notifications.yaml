@@ -1,5 +1,5 @@
 blueprint:
-  name: Cat Cam Motion → LLM → Multi-Notify (direct /media)
+  name: Cat Cam Motion → LLM → Multi-Notify (direct /media, per-second filenames)
   domain: automation
   description: >
     On motion, wait for Ring eventId, download the clip to /media, analyze with LLMVision,
@@ -60,9 +60,9 @@ variables:
   provider: !input provider_id
   subdir: !input subdir
 
+  # Per-second filename
   tstamp: "{{ now().strftime('%Y%m%dT%H%M%S') }}"
-  rand: "{{ range(100000, 999999) | random }}"
-  filename: "{{ tstamp ~ '_' ~ rand ~ '_motion.mp4' }}"
+  filename: "{{ tstamp ~ '_motion.mp4' }}"
 
   # Files saved to /config/media → served at /media/local
   media_base: /config/media/ring_cams
