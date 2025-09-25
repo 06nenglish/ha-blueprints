@@ -1,26 +1,30 @@
 blueprint:
-  name: Cat Cam Motion → LLM → Multi-Notify (in-app open, /media)
+  name: Cat Cam Motion → LLM → Multi-Notify (in-app player, /media)
   domain: automation
   description: >
     On motion, wait for Ring eventId, download the clip to /media, analyze with LLMVision,
-    then notify multiple recipients (loop) with a keyframe image and a tap-to-play video
-    that opens INSIDE the HA app (uses 'path', not external browser).
+    then notify multiple recipients with a snapshot. Tapping the notification opens an
+    in-app video player page (no 401 on iOS). Use this blueprint to create one automation
+    per camera.
 
   input:
     motion_binary_sensor:
       name: Motion Binary Sensor
+      description: Motion sensor for the camera (e.g., binary_sensor.cat_cam_motion)
       selector:
         entity:
           domain: binary_sensor
 
     event_select:
       name: Event Select (Ring)
+      description: The select entity that exposes eventId + recordingUrl attributes.
       selector:
         entity:
           domain: select
 
     notify_devices:
       name: Recipients (mobile_app devices)
+      description: Choose phones that should receive the notification.
       selector:
         device:
           multiple: true
@@ -53,17 +57,24 @@ blueprint:
 
 mode: single
 
-# ---- Global variables ----
+# -------- Global variables (safe to use in actions) --------
 variables:
+  motion_sensor_var: !input motion_binary_sensor
   event_select_entity: !input event_select
   provider: !input provider_id
   subdir: !input subdir
 
-  # Save to /config/media so LLM Vision works; HA serves as /media/local/...
+  # Filesystem + naming (save to /config/media so LLMVision works; HA serves as /media/local/...)
   tstamp: "{{ now().strftime('%Y%m%dT%H%M%S') }}"
   filename: "{{ tstamp ~ '_motion.mp4' }}"
   download_base: /config/media/ring_cams
   absolute_path: "{{ download_base ~ '/' ~ subdir ~ '/' ~ filename }}"
+
+  # Camera name for the notification title
+  cam_name: >-
+    {{ state_attr(event_select_entity, 'friendly_name')
+       or state_attr(motion_sensor_var, 'friendly_name')
+       or 'Camera' }}
 
 trigger:
   - platform: state
@@ -78,7 +89,7 @@ action:
         attribute: eventId
     timeout: "00:05"
 
-  # Precompute plain strings
+  # Build simple strings first (prevents "template value should be a string" errors)
   - alias: Build Downloader Vars
     variables:
       recording_url: "{{ state_attr(event_select_entity, 'recordingUrl') | string }}"
@@ -106,7 +117,7 @@ action:
     data:
       remember: true
       frigate_retry_attempts: 2
-      frigate_retry_seconds: 1
+      frigate_retry_seconds: 2
       max_frames: 3
       include_filename: false
       target_width: 1280
@@ -123,47 +134,56 @@ action:
         information as if directly observing the events. If no movement is detected,
         respond with: 'No activity observed. The response must be less than 255 characters.'
 
-  # Prepare notification vars (stay on /media; use 'path' to open in app)
+  # -------- Build notification variables (relative paths; open via in-app player) --------
   - alias: Build Notification Vars
     variables:
       device_list: !input notify_devices
 
-      # Keyframe path -> relative web path the app can fetch via auth
+      # Keyframe (thumbnail) → relative web path for app-authenticated fetch
       keyframe_rel: >-
         {% set p = (response.key_frame | default('')) %}
         {% if p.startswith('/config/media/') %}
-          {{ p.replace('/config/media/', '/media/local/') }}
+          {{ p.replace('/config/media/','/media/local/') }}
         {% elif p.startswith('/config/www/') %}
-          {{ p.replace('/config/www/', '/local/') }}
+          {{ p.replace('/config/www/','/local/') }}
         {% else %}
           {{ p.replace('/config','') }}
         {% endif %}
 
-      # Video is under /config/media/ring_cams/... -> served at /media/local/ring_cams/...
+      # Video saved to /config/media/... → served at /media/local/...
       video_rel: "{{ absolute_path | replace('/config/media/','/media/local/') }}"
+
+      # In-app player page (static file in /config/www). Pass video URL in hash.
+      player_url: "{{ '/local/ha-video-player.html#' ~ (video_rel | urlencode) }}"
 
       message_text: "{{ response.response_text | default('No activity observed.') }}"
 
-  # Notify each device using its mobile_app service; open INSIDE app using 'path'
+  # -------- Notify each selected device --------
   - alias: Send Notification to Each Recipient
     repeat:
       for_each: "{{ device_list }}"
       sequence:
         - alias: Build per-device notify service name
           variables:
+            # e.g., Device name "Nathan’s iPhone" -> notify.mobile_app_nathans_iphone
             service_name: >-
               {{ 'notify.mobile_app_' ~ (device_attr(repeat.item, 'name') | slugify) }}
 
         - alias: Send to device
           service: "{{ service_name }}"
           data:
-            title: Motion Detected at Cat Cam
+            title: "{{ cam_name }} — Motion Detected"
             message: "{{ message_text }}"
             data:
-              # Show keyframe; fetched via app session (auth-safe)
-              image: "{{ keyframe_rel }}"
-              # Force in-app open using the 'path' key (no external browser)
-              path: "{{ video_rel }}"
+              # Thumbnail (cross-platform: send both styles)
+              image: "{{ keyframe_rel }}"         # Android & often iOS
+              attachment:                         # iOS fallback (note hyphen)
+                url: "{{ keyframe_rel }}"
+                content-type: "jpeg"
+
+              # Tap to open in-app HTML player with THIS clip (no 401)
+              url: "{{ player_url }}"
+              clickAction: "{{ player_url }}"
 
   - alias: Cooldown Before Retrigger
     delay:
