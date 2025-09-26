@@ -1,11 +1,11 @@
 blueprint:
-  name: Cat Cam Motion → LLM → Multi-Notify (direct /media with custom buckets)
+  name: Cat Cam Motion → LLM → Multi-Notify (GIF preview, /media + /local)
   domain: automation
   description: >
     On motion, wait for Ring eventId, download the clip to /config/media/ring_cams,
-    analyze with LLMVision (snapshots in /config/media/llmvision), then notify multiple
-    recipients with a snapshot and a tap-to-play video link. Works with multiple cameras
-    (create one automation per cam). Uses your media_dirs keys: /media/llmvision and /media/ring.
+    analyze with LLMVision, render a short GIF preview to /config/www (served as /local),
+    then notify multiple recipients with the animated GIF thumbnail. Tapping the notification
+    opens the GIF (no 401). Create one automation per camera.
 
   input:
     motion_binary_sensor:
@@ -38,11 +38,45 @@ blueprint:
           integration: llmvision
 
     subdir:
-      name: Camera Subdirectory
-      description: Folder under /config/media/ring_cams (e.g. cc, front, back)
+      name: Camera Subdirectory (under ring_cams/)
+      description: Folder name for this camera (e.g. cc, front, back)
       default: cc
       selector:
         text: {}
+
+    # ---- GIF tuning ----
+    gif_duration:
+      name: GIF Duration (seconds)
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 8
+          step: 1
+          mode: slider
+          unit_of_measurement: s
+
+    gif_fps:
+      name: GIF FPS
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 15
+          step: 1
+          mode: slider
+          unit_of_measurement: fps
+
+    gif_width:
+      name: GIF Width (pixels)
+      default: 320
+      selector:
+        number:
+          min: 160
+          max: 640
+          step: 10
+          mode: slider
+          unit_of_measurement: px
 
     cooldown_minutes:
       name: Cooldown (minutes)
@@ -62,20 +96,26 @@ variables:
   provider: !input provider_id
   subdir: !input subdir
 
-  # Per-second filename (you said same-second collisions won’t happen per camera)
+  # Filenames (per-second is fine for your setup)
   tstamp: "{{ now().strftime('%Y%m%dT%H%M%S') }}"
-  filename: "{{ tstamp ~ '_motion.mp4' }}"
+  filename_mp4: "{{ tstamp ~ '_motion.mp4' }}"
+  filename_gif: "{{ tstamp ~ '_motion.gif' }}"
 
-  # Absolute FS paths (where files actually live)
+  # Absolute FS paths (where files live)
   ring_abs_base: /config/media/ring_cams
   llm_abs_base: /config/media/llmvision
+  www_abs_base: /config/www/ring_cams
 
-  media_abs: "{{ ring_abs_base ~ '/' ~ subdir ~ '/' ~ filename }}"
+  media_abs: "{{ ring_abs_base ~ '/' ~ subdir ~ '/' ~ filename_mp4 }}"
+  gif_abs_dir: "{{ www_abs_base ~ '/' ~ subdir }}"
+  gif_abs: "{{ gif_abs_dir ~ '/' ~ filename_gif }}"
 
-  # Served URLs using YOUR media_dirs keys
-  #   /config/media/ring_cams/...   -> /media/ring/...
-  #   /config/media/llmvision/...   -> /media/llmvision/...
-  media_rel: "{{ media_abs | replace('/config/media/ring_cams','/media/ring') }}"
+  # Served URLs using your media_dirs keys and /local for www
+  #   /config/media/ring_cams/... -> /media/ring/...
+  #   /config/media/llmvision/... -> /media/llmvision/...
+  #   /config/www/..              -> /local/...
+  video_rel: "{{ media_abs | replace('/config/media/ring_cams','/media/ring') }}"
+  gif_rel: "{{ gif_abs | replace('/config/www','/local') }}"
 
   cam_name: >-
     {{ state_attr(event_select_entity, 'friendly_name')
@@ -99,7 +139,7 @@ action:
     variables:
       recording_url: "{{ state_attr(event_select_entity, 'recordingUrl') | string }}"
       subdir_str: "{{ subdir | string }}"
-      filename_str: "{{ filename | string }}"
+      filename_mp4_str: "{{ filename_mp4 | string }}"
 
   - alias: Download clip to /config/media/ring_cams
     service: downloader.download_file
@@ -107,7 +147,7 @@ action:
       overwrite: false
       url: "{{ recording_url }}"
       subdir: "{{ subdir_str }}"
-      filename: "{{ filename_str }}"
+      filename: "{{ filename_mp4_str }}"
 
   - delay: "00:00:02"
 
@@ -129,11 +169,27 @@ action:
         If no movement is detected, respond with:
         'No activity observed. The response must be less than 255 characters.'
 
+  # -------- Create GIF preview under /www (served as /local) --------
+  - alias: Ensure /config/www/ring_cams/<subdir> exists
+    service: shell_command.ensure_dir
+    data:
+      dir: "{{ gif_abs_dir }}"
+
+  - alias: Render GIF with ffmpeg
+    service: shell_command.make_motion_gif
+    data:
+      input: "{{ media_abs }}"
+      output: "{{ gif_abs }}"
+      duration: !input gif_duration
+      fps: !input gif_fps
+      width: !input gif_width
+
+  # -------- Build notification vars --------
   - alias: Build Notification Vars
     variables:
       device_list: !input notify_devices
 
-      # Map LLMVision keyframe to /media/llmvision/...
+      # LLMVision keyframe -> /media/llmvision/... (fallback still image if GIF fails)
       keyframe_rel: >-
         {% set p = (response.key_frame | default('')) %}
         {% if p.startswith('/config/media/llmvision') %}
@@ -144,31 +200,37 @@ action:
           {{ p.replace('/config','') }}
         {% endif %}
 
-      # Video served as /media/ring/<subdir>/<file>.mp4
-      video_rel: "{{ media_rel }}"
-
+      # Prefer the animated GIF preview
+      image_rel: "{{ gif_rel }}"
+      # Use GIF as tap target too (simple + no auth issues)
+      tap_rel: "{{ gif_rel }}"
+      # (If you prefer to open the full video instead, switch tap_rel to video_rel)
       message_text: "{{ response.response_text | default('No activity observed.') }}"
 
+  # -------- Notify each selected device --------
   - alias: Send Notification to Each Recipient
     repeat:
       for_each: "{{ device_list }}"
       sequence:
-        - variables:
+        - alias: Build per-device notify service name
+          variables:
             service_name: >-
               {{ 'notify.mobile_app_' ~ (device_attr(repeat.item, 'name') | slugify) }}
-        - service: "{{ service_name }}"
+
+        - alias: Send to device
+          service: "{{ service_name }}"
           data:
             title: "{{ cam_name }} — Motion Detected"
             message: "{{ message_text }}"
             data:
-              # Thumbnail (use both mechanisms for cross-platform reliability)
-              image: "{{ keyframe_rel }}"
+              # Animated thumbnail (served from /local). iOS/Android accept GIF.
+              image: "{{ image_rel }}"
               attachment:
-                url: "{{ keyframe_rel }}"
-                content-type: "jpeg"
-              # Tap-to-play inside the HA app (relative URL)
-              url: "{{ video_rel }}"
-              clickAction: "{{ video_rel }}"
+                url: "{{ image_rel }}"
+                content-type: "gif"
+              # Tap → open the GIF (zero-auth friction). Change to {{ video_rel }} if you prefer MP4.
+              url: "{{ tap_rel }}"
+              clickAction: "{{ tap_rel }}"
 
   - alias: Cooldown Before Retrigger
     delay:
