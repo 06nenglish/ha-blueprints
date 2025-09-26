@@ -3,7 +3,7 @@ blueprint:
   domain: automation
   description: >
     On motion, wait for Ring eventId, download the clip to /config/media/ring_cams,
-    analyze with LLMVision, render a high-quality GIF preview to /config/www (served as /local),
+    analyze with LLMVision, render a high-quality GIF preview to /config/media/ring_cams,
     then notify multiple recipients with the animated GIF thumbnail (image: only).
     Create one automation per camera.
 
@@ -140,12 +140,12 @@ variables:
   www_abs_base: /config/www/ring_cams
 
   media_abs: "{{ ring_abs_base ~ '/' ~ subdir ~ '/' ~ filename_mp4 }}"
-  gif_abs_dir: "{{ www_abs_base ~ '/' ~ subdir }}"
+  gif_abs_dir: "{{ ring_abs_base ~ '/' ~ subdir }}"
   gif_abs: "{{ gif_abs_dir ~ '/' ~ filename_gif }}"
 
   # Served URLs (you have media_dirs keys: ring, llmvision)
   video_rel: "{{ media_abs | replace('/config/media/ring_cams','/media/ring') }}"
-  gif_rel: "{{ gif_abs | replace('/config/www','/local') }}"
+  gif_rel: "{{ gif_abs | replace('/config/media/ring_cams','/media/ring') }}"
 
   cam_name: >-
     {{ state_attr(event_select_entity, 'friendly_name')
