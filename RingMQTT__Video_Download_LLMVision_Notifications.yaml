@@ -1,30 +1,32 @@
 blueprint:
-  name: Cat Cam Motion → LLM → Multi-Notify (HQ GIF preview, image only)
+  name: Ring Camera Motion AI Detection and Notify
   domain: automation
+  author: 06nenglish
+  homeassistant:
+    min_version: 2024.10.0
   description: >
-    On motion, wait for Ring eventId, download the clip to /config/media/ring_cams,
-    analyze with LLMVision, render a high-quality GIF preview to /config/media/ring_cams,
-    then notify multiple recipients with the animated GIF thumbnail (image: only).
-    Create one automation per camera.
+    On motion detection wait for Ring eventId, download the clip to /config/media/ring_cams,
+    analyze with LLMVision Video Analyzer, render a high-quality GIF preview to /config/media/ring_cams,
+    then notify multiple recipients with the animated GIF thumbnail.
 
   input:
     motion_binary_sensor:
-      name: Motion Binary Sensor
+      name: Motion Binary Sensor (Camera Motion Detection)
       description: Motion sensor for this camera
       selector:
         entity:
           domain: binary_sensor
 
     event_select:
-      name: Event Select (Ring)
-      description: The select entity that exposes eventId + recordingUrl attributes
+      name: Event Select (Ring Cam Event Select)
+      description: The select entity that exposes eventId + recordingUrl attributes (e.g. Cam Name Select)
       selector:
         entity:
           domain: select
 
     notify_devices:
       name: Recipients (mobile_app devices)
-      description: Phones to receive the notification
+      description: Devices to receive the notification
       selector:
         device:
           multiple: true
@@ -33,14 +35,29 @@ blueprint:
 
     provider_id:
       name: LLMVision Provider
+      description: LLM Vision Configured Provider 
       selector:
         config_entry:
           integration: llmvision
 
+    ring_abs_base: 
+      name: Ring Base Path 
+      description: The Download Integration Configured Path to store the videos
+      default: /config/media/ring_cams
+      selector:
+        text: {}
+    
+    www_abs_base: 
+      name: WWW Path
+      description: Path to store GIFs to add to notifications
+      default: /config/www/ring_cams
+      selector:
+        text: {}
+
     subdir:
-      name: Camera Subdirectory (under ring_cams/)
+      name: Camera Subdirectory (under Ring Base Path and WWW Path)
       description: Folder name for this camera (e.g. cc, front, back)
-      default: cc
+      default:
       selector:
         text: {}
 
@@ -48,7 +65,7 @@ blueprint:
     gif_start:
       name: GIF Start Offset (s)
       description: Skip a bit to avoid camera wake blur (0–1s is common)
-      default: 0
+      default: 0.5
       selector:
         number:
           min: 0
@@ -59,11 +76,11 @@ blueprint:
 
     gif_duration:
       name: GIF Duration (seconds)
-      default: 5
+      default: 7
       selector:
         number:
           min: 1
-          max: 8
+          max: 10
           step: 1
           mode: slider
           unit_of_measurement: s
@@ -114,6 +131,7 @@ blueprint:
 
     cooldown_minutes:
       name: Cooldown (minutes)
+      description: Stops the automation from running again for a set time to save on number of notifications and more importantly cost!
       default: 10
       selector:
         number:
@@ -121,14 +139,18 @@ blueprint:
           max: 120
           mode: slider
           unit_of_measurement: min
+    
 
 mode: single
 
 # -------- Variables --------
 variables:
   event_select_entity: !input event_select
+  motion_sensor_entity: !input motion_binary_sensor
   provider: !input provider_id
   subdir: !input subdir
+  ring_abs_base: !input ring_abs_base
+  www_abs_base: !input www_abs_base
 
   # Per-second filename (you said collisions aren’t a concern)
   tstamp: "{{ now().strftime('%Y%m%dT%H%M%S') }}"
@@ -148,7 +170,7 @@ variables:
   gif_rel: "{{ gif_abs | replace('/config/media/ring_cams','/media/ring') }}"
 
   cam_name: >-
-    {{ state_attr(event_select_entity, 'friendly_name')
+    {{ state_attr(motion_sensor_entity, 'friendly_name')
        or state_attr(trigger.entity_id, 'friendly_name')
        or 'Camera' }}
 
@@ -171,7 +193,7 @@ action:
       subdir_str: "{{ subdir | string }}"
       filename_mp4_str: "{{ filename_mp4 | string }}"
 
-  - alias: Download clip to /config/media/ring_cams
+  - alias: Download clip to ring base path
     service: downloader.download_file
     data:
       overwrite: false
@@ -200,12 +222,12 @@ action:
         'No activity observed. The response must be less than 255 characters.'
 
   # -------- Create HQ GIF preview under /www (/local) --------
-  - alias: Ensure /config/www/ring_cams/<subdir> exists
+  - alias: Ensure Full WWW Path Structure is Created 
     service: shell_command.ensure_dir
     data:
       dir: "{{ gif_abs_dir }}"
 
-  - alias: Render HQ GIF with ffmpeg (palettegen + paletteuse)
+  - alias: Render High Quality GIF with ffmpeg
     service: shell_command.make_motion_gif_hq
     data:
       input: "{{ media_abs }}"
@@ -225,7 +247,7 @@ action:
       # Show & tap the GIF (simple, zero-auth friction)
       image_rel: "{{ gif_rel }}"
       tap_rel: "{{ gif_rel }}"
-      # If you later want tap to open the MP4 instead:
+      # For Video Playback. But not Working.
       # tap_rel: "{{ video_rel }}"
 
   # -------- Notify each selected device --------
@@ -241,12 +263,13 @@ action:
         - alias: Send to device
           service: "{{ service_name }}"
           data:
-            title: "{{ cam_name }} — Motion Detected"
+            title: "{{ cam_name }} Detected"
             message: "{{ message_text }}"
             data:
               image: "{{ image_rel }}"
-              url: "{{ tap_rel }}"
-              clickAction: "{{ tap_rel }}"
+              # For Video Playback. But not Working.
+              #url: "{{ tap_rel }}"
+              #clickAction: "{{ tap_rel }}"
 
   - alias: Cooldown Before Retrigger
     delay:
