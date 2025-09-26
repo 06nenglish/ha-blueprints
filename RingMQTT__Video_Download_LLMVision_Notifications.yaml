@@ -7,7 +7,8 @@ blueprint:
   description: >
     On motion detection wait for Ring eventId, download the clip to /config/media/ring_cams,
     analyze with LLMVision Video Analyzer, render a high-quality GIF preview to /config/media/ring_cams,
-    then notify multiple recipients with the animated GIF thumbnail.
+    then notify multiple recipients with the animated GIF thumbnail. This will also add the event to the LLM Vision 
+    timeline.
 
   input:
     motion_binary_sensor:
@@ -219,7 +220,8 @@ action:
         Summarize the events focusing only on moving subjects like people,
         vehicles, or animals. Ignore static objects. Keep it concise.
         If no movement is detected, respond with:
-        'No activity observed. The response must be less than 255 characters.'
+        'No activity observed'. 
+        The response must be less than 255 characters. Do not mention specific frames.
 
   # -------- Create HQ GIF preview under /www (/local) --------
   - alias: Ensure Full WWW Path Structure is Created 
