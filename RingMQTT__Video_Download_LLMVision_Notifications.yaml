@@ -1,11 +1,11 @@
 blueprint:
-  name: Cat Cam Motion → LLM → Multi-Notify (GIF preview, /media + /local)
+  name: Cat Cam Motion → LLM → Multi-Notify (HQ GIF preview, image only)
   domain: automation
   description: >
     On motion, wait for Ring eventId, download the clip to /config/media/ring_cams,
-    analyze with LLMVision, render a short GIF preview to /config/www (served as /local),
-    then notify multiple recipients with the animated GIF thumbnail. Tapping the notification
-    opens the GIF (no 401). Create one automation per camera.
+    analyze with LLMVision, render a high-quality GIF preview to /config/www (served as /local),
+    then notify multiple recipients with the animated GIF thumbnail (image: only).
+    Create one automation per camera.
 
   input:
     motion_binary_sensor:
@@ -44,7 +44,19 @@ blueprint:
       selector:
         text: {}
 
-    # ---- GIF tuning ----
+    # ---- GIF quality controls ----
+    gif_start:
+      name: GIF Start Offset (s)
+      description: Skip a bit to avoid camera wake blur (0–1s is common)
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 3
+          step: 0.1
+          mode: slider
+          unit_of_measurement: s
+
     gif_duration:
       name: GIF Duration (seconds)
       default: 5
@@ -58,10 +70,10 @@ blueprint:
 
     gif_fps:
       name: GIF FPS
-      default: 5
+      default: 8
       selector:
         number:
-          min: 1
+          min: 4
           max: 15
           step: 1
           mode: slider
@@ -69,14 +81,36 @@ blueprint:
 
     gif_width:
       name: GIF Width (pixels)
-      default: 320
+      default: 480
       selector:
         number:
-          min: 160
+          min: 240
           max: 640
           step: 10
           mode: slider
           unit_of_measurement: px
+
+    gif_colors:
+      name: GIF Palette Colors
+      description: 128 is a great balance; 256 = highest quality, bigger files
+      default: 128
+      selector:
+        number:
+          min: 32
+          max: 256
+          step: 32
+          mode: slider
+
+    gif_dither:
+      name: GIF Dithering
+      description: sierra2_4a (best), bayer (smaller), floyd_steinberg (punchy)
+      default: sierra2_4a
+      selector:
+        select:
+          options:
+            - sierra2_4a
+            - bayer
+            - floyd_steinberg
 
     cooldown_minutes:
       name: Cooldown (minutes)
@@ -96,24 +130,20 @@ variables:
   provider: !input provider_id
   subdir: !input subdir
 
-  # Filenames (per-second is fine for your setup)
+  # Per-second filename (you said collisions aren’t a concern)
   tstamp: "{{ now().strftime('%Y%m%dT%H%M%S') }}"
   filename_mp4: "{{ tstamp ~ '_motion.mp4' }}"
   filename_gif: "{{ tstamp ~ '_motion.gif' }}"
 
-  # Absolute FS paths (where files live)
+  # Absolute FS paths
   ring_abs_base: /config/media/ring_cams
-  llm_abs_base: /config/media/llmvision
   www_abs_base: /config/www/ring_cams
 
   media_abs: "{{ ring_abs_base ~ '/' ~ subdir ~ '/' ~ filename_mp4 }}"
   gif_abs_dir: "{{ www_abs_base ~ '/' ~ subdir }}"
   gif_abs: "{{ gif_abs_dir ~ '/' ~ filename_gif }}"
 
-  # Served URLs using your media_dirs keys and /local for www
-  #   /config/media/ring_cams/... -> /media/ring/...
-  #   /config/media/llmvision/... -> /media/llmvision/...
-  #   /config/www/..              -> /local/...
+  # Served URLs (you have media_dirs keys: ring, llmvision)
   video_rel: "{{ media_abs | replace('/config/media/ring_cams','/media/ring') }}"
   gif_rel: "{{ gif_abs | replace('/config/www','/local') }}"
 
@@ -169,43 +199,34 @@ action:
         If no movement is detected, respond with:
         'No activity observed. The response must be less than 255 characters.'
 
-  # -------- Create GIF preview under /www (served as /local) --------
+  # -------- Create HQ GIF preview under /www (/local) --------
   - alias: Ensure /config/www/ring_cams/<subdir> exists
     service: shell_command.ensure_dir
     data:
       dir: "{{ gif_abs_dir }}"
 
-  - alias: Render GIF with ffmpeg
-    service: shell_command.make_motion_gif
+  - alias: Render HQ GIF with ffmpeg (palettegen + paletteuse)
+    service: shell_command.make_motion_gif_hq
     data:
       input: "{{ media_abs }}"
       output: "{{ gif_abs }}"
+      start: !input gif_start
       duration: !input gif_duration
       fps: !input gif_fps
       width: !input gif_width
+      colors: !input gif_colors
+      dither: !input gif_dither
 
   # -------- Build notification vars --------
   - alias: Build Notification Vars
     variables:
       device_list: !input notify_devices
-
-      # LLMVision keyframe -> /media/llmvision/... (fallback still image if GIF fails)
-      keyframe_rel: >-
-        {% set p = (response.key_frame | default('')) %}
-        {% if p.startswith('/config/media/llmvision') %}
-          {{ p.replace('/config/media/llmvision','/media/llmvision') }}
-        {% elif p.startswith('/config/media/') %}
-          {{ p.replace('/config/media/ring_cams','/media/ring') }}
-        {% else %}
-          {{ p.replace('/config','') }}
-        {% endif %}
-
-      # Prefer the animated GIF preview
-      image_rel: "{{ gif_rel }}"
-      # Use GIF as tap target too (simple + no auth issues)
-      tap_rel: "{{ gif_rel }}"
-      # (If you prefer to open the full video instead, switch tap_rel to video_rel)
       message_text: "{{ response.response_text | default('No activity observed.') }}"
+      # Show & tap the GIF (simple, zero-auth friction)
+      image_rel: "{{ gif_rel }}"
+      tap_rel: "{{ gif_rel }}"
+      # If you later want tap to open the MP4 instead:
+      # tap_rel: "{{ video_rel }}"
 
   # -------- Notify each selected device --------
   - alias: Send Notification to Each Recipient
@@ -223,12 +244,7 @@ action:
             title: "{{ cam_name }} — Motion Detected"
             message: "{{ message_text }}"
             data:
-              # Animated thumbnail (served from /local). iOS/Android accept GIF.
               image: "{{ image_rel }}"
-              attachment:
-                url: "{{ image_rel }}"
-                content-type: "gif"
-              # Tap → open the GIF (zero-auth friction). Change to {{ video_rel }} if you prefer MP4.
               url: "{{ tap_rel }}"
               clickAction: "{{ tap_rel }}"
 
