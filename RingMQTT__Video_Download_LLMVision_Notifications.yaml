@@ -62,6 +62,18 @@ blueprint:
       selector:
         text: {}
 
+    # ---- LLM tokens (added) ----
+    llm_max_tokens:
+      name: LLM Max Tokens
+      description: Token budget for the analyzer response
+      default: 20
+      selector:
+        number:
+          min: 10
+          max: 1000
+          step: 10
+          mode: slider
+
     # ---- GIF quality controls ----
     gif_start:
       name: GIF Start Offset (s)
@@ -142,7 +154,9 @@ blueprint:
           unit_of_measurement: min
     
 
+# prevent overlap, drop extra triggers quietly
 mode: single
+max_exceeded: silent
 
 # -------- Variables --------
 variables:
@@ -152,6 +166,9 @@ variables:
   subdir: !input subdir
   ring_abs_base: !input ring_abs_base
   www_abs_base: !input www_abs_base
+  llm_max_tokens: !input llm_max_tokens
+  cooldown_minutes_var: !input cooldown_minutes
+  cooldown_seconds: "{{ (cooldown_minutes_var | int(0)) * 60 }}"
 
   # Per-second filename (you said collisions aren’t a concern)
   tstamp: "{{ now().strftime('%Y%m%dT%H%M%S') }}"
@@ -181,6 +198,22 @@ trigger:
     to: "on"
 
 action:
+  # Guard 1: do not start if another instance is already running
+  - alias: Guard: exit if already running
+    condition: template
+    value_template: "{{ (state_attr(this.entity_id, 'current') | int(0)) <= 1 }}"
+
+  # Guard 2: strict rate-limit by last_triggered vs now() and your cooldown
+  - alias: Guard: enforce hard cooldown window
+    condition: template
+    value_template: >-
+      {% set last = state_attr(this.entity_id, 'last_triggered') %}
+      {% if last is none %}
+        true
+      {% else %}
+        {{ (as_timestamp(now()) - as_timestamp(last)) >= (cooldown_seconds | int) }}
+      {% endif %}
+
   - alias: Wait for EventId to change
     wait_for_trigger:
       - platform: state
@@ -213,7 +246,7 @@ action:
       remember: true
       max_frames: 3
       target_width: 1280
-      max_tokens: 1000
+      max_tokens: "{{ llm_max_tokens }}"
       generate_title: true
       expose_images: true
       message: >
@@ -223,7 +256,7 @@ action:
         'No activity observed'. 
         The response must be less than 255 characters. Do not mention specific frames.
 
-  # -------- Create HQ GIF preview under /www (/local) --------
+  # -------- Create HQ GIF preview (kept at your current path) --------
   - alias: Ensure Full WWW Path Structure is Created 
     service: shell_command.ensure_dir
     data:
