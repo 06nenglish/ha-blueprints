@@ -199,12 +199,12 @@ trigger:
 
 action:
   # Guard 1: do not start if another instance is already running
-  - alias: Guard: exit if already running
+  - alias: 'Guard: exit if already running'
     condition: template
     value_template: "{{ (state_attr(this.entity_id, 'current') | int(0)) <= 1 }}"
 
   # Guard 2: strict rate-limit by last_triggered vs now() and your cooldown
-  - alias: Guard: enforce hard cooldown window
+  - alias: 'Guard: enforce hard cooldown window'
     condition: template
     value_template: >-
       {% set last = state_attr(this.entity_id, 'last_triggered') %}
